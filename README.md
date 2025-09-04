@@ -11,7 +11,7 @@ Accurate short-horizon volatility forecasts strengthen option pricing, liquidity
 - **Microstructure features:** engineered spreads (L1/L2), depth, imbalance, WAP-based log-returns, realized volatility, and late-window cuts at 150s/300s/450s.  
 - **Relational signals:** constructed nearest-neighbor aggregates across stocks and time windows (price, volatility, trade size pivots); added stability scalers, rolling RV measures, and stock embeddings.  
 - **Modeling:** trained a single XGBoost regressor with time-ordered contiguous folds to mimic live deployment; evaluated with custom RMSPE and volatility-scaled sample weights (1/|y|²).  
-- **Results:** achieved strong out-of-fold performance (OOF RMSPE = **0.19548**).
+- **Results:** • Results: **external held-out test RMSPE = 0.19548**; time-aware CV (OOF) mean **= 0.18087** across 4 folds [0.18034, 0.18072, 0.18121, 0.18121].
 
 # Dataset
 
@@ -157,4 +157,73 @@ Together, these features form the backbone of the volatility forecasting model.
 ### Why this matters
 - Shard-wise parquet loading keeps processing scalable on large datasets.
 - Consistent indexing across book, trade, and labels ensures feature–target alignment with zero leakage.
+
+  ## 3) Modeling & Training
+
+**Objective**  
+Learn stable short-horizon volatility forecasts that generalize across time and securities.
+
+---
+
+### A. Training Data Construction
+- **Train set:** all `(stock_id, time_id)` rows from `train.csv`, with target = **next-window** realized volatility.  
+- **Test set:** all `(stock_id, time_id)` pairs from `test.csv`, aligned via `row_id`.  
+- **Features:** high-dimensional numeric matrix combining:
+  - **Microstructure:** WAP log-returns/RV, spreads, depth, imbalance, late-window cuts (150/300/450s).
+  - **Relational:** k-NN aggregates across time and stocks (price/vol/size pivots), relative ranks.
+  - **Temporal:** rolling realized volatility by book volume.
+  - **Stock embeddings:** low-dimensional LDA factors.
+- **Exclusions:** `target`, `time_id`, and `row_id` are never used as predictors.
+- **Leakage safeguards:** all features come strictly from the **current** 10-minute window; labels come from the **next** window.
+
+---
+
+### B. Evaluation Metric — Root Mean Squared Percentage Error (RMSPE)
+
+**RMSPE**
+
+$$
+\mathrm{RMSPE}
+= \sqrt{\frac{1}{n}\sum_{i=1}^{n}\left(\frac{y_i-\hat{y}_i}{\max\!\left(|y_i|,\varepsilon\right)}\right)^2}
+$$
+
+- **Implementation:** denominator stabilized with $\max\\left(|y|,\varepsilon\right)$ (e.g., $\varepsilon \approx 10^{-9}$).
+
+- **Sample weights:**
+
+$$
+w_i \=\ \frac{1}{\max\\left(|y_i|,\varepsilon\right)^2}
+$$
+
+to emphasize accuracy in low-volatility regimes where proportional errors dominate.
+
+### C. Cross-Validation Strategy
+- **Time-aware folds:** contiguous, non-overlapping splits along the ordered `time_id` sequence, mimicking live deployment.
+- **Fold construction:** the full `time_id` range sorted; four validation blocks carved with hard borders (≈383 buckets each).
+- **Outcome:** clean out-of-fold (OOF) predictions for unbiased diagnostics and model selection.
+
+---
+
+### D. Model Choice & Training
+- **Model:** XGBoost regressor (tree-based GBDT) for nonlinear interactions, mixed scales, and sparse signals.
+- **Key hyperparameters:**
+  - `max_depth=8`, `eta=0.03`, `min_child_weight=50`
+  - `subsample=0.8`, `colsample_bytree=0.6`
+  - `reg_lambda=5.0`, `reg_alpha=0.0`, `max_bin=256`
+  - `tree_method="hist"` (GPU-ready via `"gpu_hist"`)
+- **Training regimen:** up to 20,000 boosting rounds with early stopping (patience = 500), monitored by custom RMSPE with sample weights.
+- **Final fit:** retrain on all labeled data using the average “best iteration” from CV, then infer on the test feature matrix.
+
+---
+
+### E. Results
+- **Cross-validation (4 folds, OOF):**
+  - Per-fold RMSPE = `[0.18034, 0.18072, 0.18121, 0.18121]`
+  - Mean CV RMSPE = `0.18087`
+  - Best fold RMSPE = `0.18034`
+  - Fold-to-fold variation `< 0.001` → robust generalization.
+- **External held-out test:** RMSPE = **0.19548** using the final XGBoost model.
+- **Interpretation:** test score is ~8.1% higher than CV mean, reflecting modest time-shift between training and held-out periods. Neighbor/rank features and volatility-scaled weights remain robust, though generalization can be tightened further under regime shifts.
+
+
 
